@@ -4,6 +4,21 @@
 #include <hiprand/hiprand_kernel.h>
 #include <hiprand/hiprand.h>
 
+
+typedef struct { uint64_t state; } RNG;
+
+uint32_t rngNext(RNG* rng){
+    uint64_t old = rng->state;
+    rng->state = old * 6364136223846793005ULL + 1442695040888963407ULL;
+    uint32_t xorshifted = ((old >> 18u) ^ old) >> 27u;
+    uint32_t rot = old >> 59u;
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+}
+
+float rngNextf(RNG* rng){
+    return (float)rngNext(rng) / (float)0xFFFFFFFF;
+}
+
 __device__ float activationTan(float input){
     return tanhf(input);
 }
@@ -56,6 +71,10 @@ __global__ void runNN(float input, float* inputWeights, float* inputBiases, floa
     if (i >= n) return;
     inputToHiddenLayer(i, input, inputWeights, inputBiases, hiddenNeurons, activatedNeurons, n);
     hiddenToOutputLayer(i, outputWeights, activatedNeurons, output, n);
+}
+
+float MSE(float value, float realValue){
+    return ((value - realValue) * (value - realValue));
 }
 
 int main() {
@@ -139,19 +158,32 @@ int main() {
     hiprandGenerateUniform(gen, outputWeights, n);
     hiprandDestroyGenerator(gen);
 
-    float input = 1.5; // in radians.
-    float expectedValue = sinf(1.5);
     float learningRate = 0.0015;
     float cpuOutput;
 
+    RNG inputRNG;
+    inputRNG.state = 1 * 1973 + 13 * 9277 + 3001 * 2699;
+    rngNext(&inputRNG);
+    float input = rngNextf(&inputRNG); // in radians.
     hipLaunchKernelGGL(initWeights, dim3(BlockForProgram), dim3(threadsPerBlock), 0, 0, inputWeights, inputBiases, outputWeights, n);
     error = hipMemset(outputBias, 0, sizeof(float));
-    for(uint i = 0; i < 250; i++){
+    float expectedValue = sinf(input); // sin x
+    for(uint i = 0; i < 5128; i++){
         error = hipMemset(output, 0, sizeof(float));
         hipLaunchKernelGGL(runNN, dim3(BlockForProgram), dim3(threadsPerBlock), 0, 0, input, inputWeights, inputBiases, outputWeights, outputBias, hiddenNeuronValues, activatedNeuronValues, output, n);
         hipLaunchKernelGGL(addOutputBias, dim3(1), dim3(1), 0, 0, output, outputBias);
         hipLaunchKernelGGL(computeGradient, dim3(BlockForProgram), dim3(threadsPerBlock), 0, 0, outputWeights, inputWeightGradients, inputBiasGradients, outputWeightGradients, outputBiasGradient, hiddenNeuronValues, activatedNeuronValues, n, input, output, expectedValue);
         hipLaunchKernelGGL(learn, dim3(BlockForProgram), dim3(threadsPerBlock), 0, 0, inputWeights, inputBiases, inputWeightGradients, inputBiasGradients, outputWeights, outputBias, outputWeightGradients, outputBiasGradient, n, learningRate);
+        /*
+        error = hipMemcpy(&cpuOutput, output, 4, hipMemcpyDeviceToHost);
+        if(error != hipSuccess){
+            fprintf(stderr, "Erorr couldn't copy output from GPU to CPU memory: \%sn", hipGetErrorName(error));
+            abort();
+        }
+        fprintf(stderr, "For %d iteration, the MSE is:%f\n", i, MSE(cpuOutput, expectedValue));
+        */
+        input = rngNextf(&inputRNG); // in radians.
+        expectedValue = sinf(input); // sin x
     }
     error = hipMemcpy(&cpuOutput, output, 4, hipMemcpyDeviceToHost);
     if(error != hipSuccess){
@@ -159,6 +191,19 @@ int main() {
         abort();
     }
     fprintf(stderr, "Output for sin(%f)| NN: %f | Arithematic: %f", input, cpuOutput, expectedValue);
+    fprintf(stderr, "The MSE is:%f\n", MSE(cpuOutput, expectedValue));
+    input = rngNextf(&inputRNG);
+    expectedValue = sinf(input);
+    error = hipMemset(output, 0, sizeof(float));
+    hipLaunchKernelGGL(runNN, dim3(BlockForProgram), dim3(threadsPerBlock), 0, 0, input, inputWeights, inputBiases, outputWeights, outputBias, hiddenNeuronValues, activatedNeuronValues, output, n);
+    hipLaunchKernelGGL(addOutputBias, dim3(1), dim3(1), 0, 0, output, outputBias);
+    error = hipMemcpy(&cpuOutput, output, 4, hipMemcpyDeviceToHost);
+    if(error != hipSuccess){
+        fprintf(stderr, "Error couldn't copy output from GPU to CPU memory: \%sn", hipGetErrorName(error));
+        abort();
+    }
+    fprintf(stderr, "Output for sin(%f)| NN: %f | Arithematic: %f", input, cpuOutput, expectedValue);
+    fprintf(stderr, "The MSE is:%f\n", MSE(cpuOutput, expectedValue));
 
     error = hipFree(inputWeights);
     error = hipFree(outputWeights);

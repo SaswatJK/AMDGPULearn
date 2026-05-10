@@ -1,3 +1,4 @@
 #!/bin/bash
 name=$1
-hipcc -O3 -march=native "$name.hip" -o "build/$neuralNet" -lhiprand
+cd build
+hipcc -O3 -march=native "../$name" -o "nn" -lhiprand
